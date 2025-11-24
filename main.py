@@ -1,151 +1,215 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os
-from PIL import Image, ImageFilter
+"""
+Script per trovare la COMBINAZIONE MIGLIORE DI TIPI POKÉMON
+contro un avversario dato uno o due tipi, basata sia su:
 
-# --------------------------
-# FUNZIONI DI SIMULAZIONE
-# --------------------------
+- efficacia offensiva
+- resistenza difensiva
 
-def simulate_zoom(img, f_orig, f_new):
-    """
-    - f_new > f_orig → zoom (crop)
-    - f_new < f_orig → grandangolo con bordi sfocati
-    """
+E infine suggerisce Pokémon reali che possiedono quei tipi.
 
-    w, h = img.size
+✔ Aggiornamento automatico tramite PokeAPI
+✔ Mostra tipi disponibili
+✔ Input validato
+✔ Calcolo del miglior tipo offensivo
+✔ Calcolo del miglior tipo difensivo
+✔ Combina i risultati per trovare la miglior coppia di tipi
+✔ Ricerca Pokémon che hanno quel/i tipo/i
+"""
 
-    # -----------------------------
-    # 1) ZOOM (crop)
-    # -----------------------------
-    if f_new > f_orig:
-        zoom = f_new / f_orig
-        new_w = int(w / zoom)
-        new_h = int(h / zoom)
+import requests
+import urllib3
+from itertools import combinations
 
-        left = (w - new_w) // 2
-        top = (h - new_h) // 2
-        right = left + new_w
-        bottom = top + new_h
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-        return img.crop((left, top, right, bottom))
-
-    # -----------------------------
-    # 2) GRANDANGOLO (expand con blur)
-    # -----------------------------
-    elif f_new < f_orig:
-        expand = f_orig / f_new
-
-        new_w = int(w * expand)
-        new_h = int(h * expand)
-
-        # Crea sfondo sfocato: si parte dall'immagine ingrandita
-        blurred_bg = img.resize((new_w, new_h), Image.LANCZOS)
-        blurred_bg = blurred_bg.filter(ImageFilter.GaussianBlur(radius=50))
-
-        # Incolla l'immagine originale al centro
-        offset_x = (new_w - w) // 2
-        offset_y = (new_h - h) // 2
-
-        blurred_bg.paste(img, (offset_x, offset_y))
-        return blurred_bg
-
-    else:
-        return img.copy()
+POKEAPI_BASE = "https://pokeapi.co/api/v2/"
 
 
-# --------------------------
-# MENÙ GUIDATO
-# --------------------------
+# ------------------------------------------------------------
+# 1️⃣ Recupero tipi
+# ------------------------------------------------------------
+def fetch_types():
+    url = f"{POKEAPI_BASE}type/"
+    res = requests.get(url, verify=False).json()
+    types = [t["name"] for t in res["results"] if t["name"] not in ["shadow", "unknown"]]
+    return types
 
-def guided_flow_zoom():
-    os.system('cls' if os.name == 'nt' else 'clear')
-    print("— Generatore immagini a diverse lunghezze focali —\n")
 
-    # 1) Input immagine
+# ------------------------------------------------------------
+# 2️⃣ Recupero relazioni tipo/attacco/difesa
+# ------------------------------------------------------------
+def fetch_type_relations():
+    types = fetch_types()
+    relations = {}
+
+    for t in types:
+        url = f"{POKEAPI_BASE}type/{t}/"
+        r = requests.get(url, verify=False).json()
+        relations[t] = {
+            "attack": {
+                "double": [x["name"] for x in r["damage_relations"]["double_damage_to"]],
+                "half":   [x["name"] for x in r["damage_relations"]["half_damage_to"]],
+                "zero":   [x["name"] for x in r["damage_relations"]["no_damage_to"]],
+            },
+            "defense": {
+                "double": [x["name"] for x in r["damage_relations"]["double_damage_from"]],
+                "half":   [x["name"] for x in r["damage_relations"]["half_damage_from"]],
+                "zero":   [x["name"] for x in r["damage_relations"]["no_damage_from"]],
+            }
+        }
+    return relations
+
+
+# ------------------------------------------------------------
+# 3️⃣ Calcolo moltiplicatore d'attacco
+# ------------------------------------------------------------
+def get_multiplier(attacker, enemy_types, relations):
+    mult = 1
+    for et in enemy_types:
+        if et in relations[attacker]["attack"]["double"]:
+            mult *= 2
+        if et in relations[attacker]["attack"]["half"]:
+            mult *= 0.5
+        if et in relations[attacker]["attack"]["zero"]:
+            mult *= 0
+    return mult
+
+
+# ------------------------------------------------------------
+# 4️⃣ Calcolo vulnerabilità difensiva
+# ------------------------------------------------------------
+def get_defense_score(my_type, enemy_types, relations):
+    score = 0
+    for et in enemy_types:
+        # che danno fa l'avversario A me
+        if my_type in relations[et]["attack"]["double"]:
+            score -= 2
+        if my_type in relations[et]["attack"]["half"]:
+            score += 1
+        if my_type in relations[et]["attack"]["zero"]:
+            score += 3
+    return score
+
+
+# ------------------------------------------------------------
+# 5️⃣ Recupero tutti i Pokémon con tipi
+# ------------------------------------------------------------
+def fetch_all_pokemon():
+    limit = 10000
+    res = requests.get(f"{POKEAPI_BASE}pokemon?limit={limit}", verify=False).json()
+
+    pokemon_list = []
+    for p in res["results"]:
+        data = requests.get(p["url"], verify=False).json()
+        types = [t["type"]["name"] for t in data["types"]]
+        pokemon_list.append({"name": data["name"], "types": types})
+    return pokemon_list
+
+
+# ------------------------------------------------------------
+# 6️⃣ Migliori tipi offensivi
+# ------------------------------------------------------------
+def best_offensive(enemy_types, relations):
+    scores = []
+    for t in relations.keys():
+        mult = get_multiplier(t, enemy_types, relations)
+        scores.append((t, mult))
+
+    max_mult = max(s for _, s in scores)
+    return [t for t, m in scores if m == max_mult]
+
+
+# ------------------------------------------------------------
+# 7️⃣ Migliori tipi difensivi
+# ------------------------------------------------------------
+def best_defensive(enemy_types, relations):
+    scores = []
+    for t in relations.keys():
+        s = get_defense_score(t, enemy_types, relations)
+        scores.append((t, s))
+
+    max_score = max(s for _, s in scores)
+    return [t for t, s in scores if s == max_score]
+
+
+# ------------------------------------------------------------
+# 8️⃣ Combina attacco + difesa
+# ------------------------------------------------------------
+def combine_types(best_att, best_def):
+    inter = list(set(best_att).intersection(best_def))
+    if inter:
+        return inter  # Jackpot: ottimi attacco + ottima difesa
+    return list(set(best_att + best_def))
+
+
+# ------------------------------------------------------------
+# 9️⃣ Pokémon che hanno questi tipi
+# ------------------------------------------------------------
+def pokemon_with_types(types, pokemon_list):
+    result = []
+    for p in pokemon_list:
+        if any(t in p["types"] for t in types):
+            result.append(p)
+    return result
+
+
+# ------------------------------------------------------------
+# 🔟 Input validato
+# ------------------------------------------------------------
+def get_valid_enemy_types(valid_types):
+    print("\nTIPI DISPONIBILI:")
+    print(", ".join(t.upper() for t in sorted(valid_types)))
+    print()
+
     while True:
-        img_path = input("1) Inserisci il percorso dell'immagine sorgente: ").strip()
-        if not os.path.isfile(img_path):
-            print("❌ File non trovato. Riprova.")
+        t1 = input("Tipo avversario 1: ").strip().lower()
+        if t1 not in valid_types:
+            print(f"❌ '{t1}' non è un tipo valido.\n")
             continue
-        try:
-            img = Image.open(img_path).convert("RGB")
-        except Exception:
-            print("❌ Formato immagine non valido.")
+
+        t2 = input("Tipo avversario 2 (invio se nessuno): ").strip().lower()
+
+        if t2 == "":
+            return [t1]
+
+        if t2 not in valid_types:
+            print(f"❌ '{t2}' non è un tipo valido.\n")
             continue
-        break
 
-    # 2) Focale originale
-    while True:
-        try:
-            focale_orig = float(input("\n2) Inserisci la focale originale (mm): ").strip())
-            break
-        except ValueError:
-            print("❌ Valore non valido, inserisci un numero.")
-
-    # 3) Altre focali
-    focali = []
-    print("\n3) Inserisci le altre focali da simulare (mm)")
-    print("   (separate da spazio, es: 12 18 35 70 200)")
-    while True:
-        try:
-            raw = input("   → ").strip()
-            focali = [float(x) for x in raw.split()]
-            if len(focali) == 0:
-                print("❌ Inserisci almeno una focale.")
-                continue
-            break
-        except ValueError:
-            print("❌ Formato non valido. Usa numeri separati da spazio.")
-
-    # 4) Cartella output
-    out_dir = input("\n4) Nome cartella output [default: output_zoom]: ").strip() or "output_zoom"
-    os.makedirs(out_dir, exist_ok=True)
-
-    # 5) Formato di output
-    print("\n5) Formato output:")
-    print("   jpg | png | webp | tiff")
-    while True:
-        fmt = input("   → [default: jpg]: ").strip().lower() or "jpg"
-        if fmt in ("jpg", "jpeg", "png", "webp", "tiff"):
-            break
-        print("❌ Formato non valido.")
-
-    # 6) Anteprima impostazioni
-    print("\n📋 Anteprima impostazioni:")
-    print(f" • Immagine sorgente: {img_path}")
-    print(f" • Focale originale: {focale_orig} mm")
-    print(f" • Focali da generare: {', '.join(str(int(f)) + 'mm' for f in focali)}")
-    print(f" • Formato output: {fmt}")
-    print(f" • Cartella output: {out_dir}\n")
-
-    if input("Procedere con la generazione? [S/n]: ").strip().lower() in ("n", "no"):
-        print("❌ Operazione annullata.")
-        return
-
-    # 7) Generazione immagini
-    base_name = os.path.splitext(os.path.basename(img_path))[0]
-    ext = f".{fmt}"
-
-    print("\n⏳ Generazione in corso...\n")
-
-    for f_new in focali:
-        result = simulate_zoom(img, focale_orig, f_new)
-
-        kind = "WIDE" if f_new < focale_orig else "ZOOM"
-        out_name = f"{base_name}_{kind}_{int(f_new)}mm{ext}"
-        out_path = os.path.join(out_dir, out_name)
-
-        result.save(out_path)
-        print(f"✔  Salvata {kind} {int(f_new)}mm → {out_path}")
-
-    print("\n✅ Tutto fatto! Buona visione 🎉")
+        return [t1, t2]
 
 
-# --------------------------
-# Entrypoint
-# --------------------------
+# ------------------------------------------------------------
+# MAIN
+# ------------------------------------------------------------
+def main():
+    print("Caricamento tipi Pokémon…")
+    relations = fetch_type_relations()
+    valid_types = list(relations.keys())
+
+    print("Caricamento lista Pokémon…")
+    pokemon_list = fetch_all_pokemon()
+
+    enemy_types = get_valid_enemy_types(valid_types)
+    print(f"\nTipi avversario: {enemy_types}")
+
+    # Analisi
+    best_att = best_offensive(enemy_types, relations)
+    best_def = best_defensive(enemy_types, relations)
+    combined = combine_types(best_att, best_def)
+
+    print("\n🔥 MIGLIORI TIPI OFFENSIVI:", ", ".join(t.upper() for t in best_att))
+    print("🛡 MIGLIORI TIPI DIFENSIVI:", ", ".join(t.upper() for t in best_def))
+    print("\n💎 MIGLIOR COMBINAZIONE COMPLESSIVA:", ", ".join(t.upper() for t in combined))
+
+    print("\nPokémon consigliati:")
+    found = pokemon_with_types(combined, pokemon_list)
+    for p in found[:50]:
+        print(f"- {p['name'].capitalize()} ({', '.join(p['types']).upper()})")
+
 
 if __name__ == "__main__":
-    guided_flow_zoom()
+    main()
